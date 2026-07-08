@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+outputs/*
+!outputs/.gitkeep
+!outputs/*.png
+*.zip
+*.xyz
+*.tif
