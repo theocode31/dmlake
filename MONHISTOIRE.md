@@ -12,3 +12,13 @@ Avant de pouvoir extraire des features de relief (pente, distance au rivage...),
 07.07.2026
 
 Aujourd'hui , on fait une extraction des features de relief. D'abord un masque d'eau (enveloppe convexe des points bathy rasterisée sur la grille du MNT, suffisant pour un lac simple comme Lac de Joux, pas besoin du filtrage Sobel utilisé pour des lacs plus complexes). Puis, pour un échantillon de 2000 points du fond du lac, dans 8 directions (0 à 315°, pas de 45°), recherche du rivage (transition eau→terre dans le masque), puis prolongation du rayon sur terre pour mesurer pente et dénivelé à 4 distances (150/300/600/900m). resultat dans :lacdejoux_cross_shore_profiles
+
+09.07.2026
+
+Premier modèle ML pour prédire la profondeur à partir des features de relief du jour 3 (`train_model.py`). J'exclus `angle45`/`angle225` (~60% de NaN, axe aligné avec le grand axe du lac) et les flags `_shore_extrapolated`. Split 75/25, Random Forest.
+
+Premier essai : R²=0.957, mais fuite de données repérée — `angle0_z_DEM_ref` (= z − altitude du rivage) est quasi-linéairement dérivée de la cible elle-même et dominait l'importance des features à 50.7%. Chez Kacimi cette variable sert justement de cible alternative, pas de feature : je la retire.
+
+Deuxième essai (sans la fuite) : RMSE=2.60m, MAE=1.59m, R²=0.938. Feature importance dominée par les distances au rivage (angle180/270/135).
+
+Limite non résolue : le split est aléatoire par point sur un seul lac, donc les features spatiales (distances au rivage) agissent comme une quasi-empreinte de position (x,y) — le modèle peut interpoler un point de test proche d'un point d'entraînement plutôt que généraliser une vraie relation relief→profondeur. Kacimi évite ça en splittant par lac entier (`survey_id`), impossible ici avec un seul lac. Plutôt qu'un split spatial artificiel du Lac de Joux, je documente la limite et je testerai la généralisation avec un deuxième lac (entraînement sur un lac, test sur l'autre) une fois ses features extraites.
