@@ -22,3 +22,11 @@ Premier essai : R²=0.957, mais fuite de données repérée — `angle0_z_DEM_re
 Deuxième essai (sans la fuite) : RMSE=2.60m, MAE=1.59m, R²=0.938. Feature importance dominée par les distances au rivage (angle180/270/135).
 
 Limite non résolue : le split est aléatoire par point sur un seul lac, donc les features spatiales (distances au rivage) agissent comme une quasi-empreinte de position (x,y) — le modèle peut interpoler un point de test proche d'un point d'entraînement plutôt que généraliser une vraie relation relief→profondeur. Kacimi évite ça en splittant par lac entier (`survey_id`), impossible ici avec un seul lac. Plutôt qu'un split spatial artificiel du Lac de Joux, je documente la limite et je testerai la généralisation avec un deuxième lac (entraînement sur un lac, test sur l'autre) une fois ses features extraites.
+
+13.07.2026
+
+Repris le point en suspens du jour 4, avec un deuxième lac cette fois : Lungernsee (plus profond que Lac de Joux, ~68m contre 31m, mais surface plus petite). Même pipeline relancé dessus sans souci, 2000 points, pas de NaN.
+
+Premier essai en gardant z comme cible : RMSE de 344m, du grand n'importe quoi. En fait logique, Lac de Joux est vers 1000m d'altitude et Lungernsee vers 650m, le modèle avait juste appris le niveau du lac d'entraînement, pas une vraie relation relief-profondeur.
+
+Repris avec angle0_z_DEM_ref comme cible (profondeur relative au rivage, comme chez Kacimi) au lieu de z. L'erreur redevient raisonnable (30-50m) mais le R² reste négatif dans les deux sens du train/test, donc pire que de prédire la moyenne. Avec seulement 2 lacs le modèle n'a pas de quoi apprendre une relation qui généralise vraiment. Résultat pas terrible mais pas étonnant non plus, il faudra clairement plus de lacs pour voir si ça marche. Je m'arrête là pour aujourd'hui.

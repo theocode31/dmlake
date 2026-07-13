@@ -1,11 +1,4 @@
-"""
-Jour 2 : ajouter le MNT et verifier l'alignement spatial avec la bathymetrie.
 
-Objectif : recuperer le MNT (swissALTI3D, 2m) autour du Lac de Joux, le
-mosaiquer, et le superposer avec le nuage de points bathymetriques du jour 1
-pour verifier qu'on est bien dans le meme referentiel spatial (EPSG:2056)
-avant de commencer a extraire des features de relief (jour 3+).
-"""
 import io
 import re
 import zipfile
@@ -20,7 +13,7 @@ from pyproj import Transformer
 from rasterio.merge import merge
 from rasterio.transform import array_bounds, rowcol
 
-LAKE_ID = "lacdejoux"
+LAKE_ID = "lungernsee"
 BATHY_URL = (
     f"https://data.geo.admin.ch/ch.swisstopo.swissbathy3d/swissbathy3d_{LAKE_ID}/"
     f"swissbathy3d_{LAKE_ID}_2056_5728.xyz.zip"
@@ -33,9 +26,6 @@ DEM_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def download_bathymetry_with_cells() -> tuple[pd.DataFrame, set[tuple[int, int]]]:
-    """Telecharge le nuage de points bathymetriques et releve au passage les
-    cellules de la grille kilometrique (E, N) couvertes, pour cibler ensuite
-    le telechargement du MNT sur la meme zone."""
     print(f"Telechargement de {BATHY_URL} ...")
     response = requests.get(BATHY_URL, timeout=60)
     response.raise_for_status()
@@ -57,8 +47,6 @@ def download_bathymetry_with_cells() -> tuple[pd.DataFrame, set[tuple[int, int]]
 
 
 def buffer_cells(cells: set[tuple[int, int]], ring: int = 1) -> set[tuple[int, int]]:
-    """Ajoute une couronne de cellules voisines autour des cellules bathy, pour
-    que le MNT deborde un peu sur le rivage (utile pour les features de jour 3)."""
     buffered = set()
     for e, n in cells:
         for de in range(-ring, ring + 1):
@@ -68,8 +56,6 @@ def buffer_cells(cells: set[tuple[int, int]], ring: int = 1) -> set[tuple[int, i
 
 
 def find_dem_tiles(cells: set[tuple[int, int]]) -> dict[tuple[int, int], str]:
-    """Interroge l'API STAC de swisstopo pour trouver les tuiles MNT 2m qui
-    couvrent les cellules demandees."""
     es = [c[0] for c in cells]
     ns = [c[1] for c in cells]
     min_e, max_e = min(es), max(es)
@@ -131,7 +117,6 @@ def build_mosaic(tile_paths: list[Path]):
 
 
 def sample_dem_at_points(mosaic: np.ndarray, transform, xs, ys) -> np.ndarray:
-    """Echantillonne l'altitude du MNT (nearest) aux coordonnees (x, y) donnees."""
     rows, cols = rowcol(transform, xs, ys)
     rows = np.clip(np.asarray(rows), 0, mosaic.shape[0] - 1)
     cols = np.clip(np.asarray(cols), 0, mosaic.shape[1] - 1)
@@ -171,11 +156,6 @@ def main() -> None:
         f"altitude min/max = {np.nanmin(mosaic):.1f}/{np.nanmax(mosaic):.1f} m"
     )
 
-    # Verification d'alignement : le MNT swissALTI3D ne voit pas le fond du lac
-    # (LiDAR aerien, pas de penetration dans l'eau) -- au niveau des points bathy
-    # on s'attend donc a une altitude MNT ~constante, proche du niveau du lac,
-    # nettement au-dessus de l'altitude du fond (bathy z). Si c'est le cas, les
-    # deux jeux de donnees sont bien dans le meme referentiel spatial.
     sample = bathy_df.sample(n=min(500, len(bathy_df)), random_state=42)
     dem_at_bathy = sample_dem_at_points(mosaic, transform, sample.x.values, sample.y.values)
     print(
