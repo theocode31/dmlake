@@ -13,7 +13,7 @@ from pyproj import Transformer
 from rasterio.merge import merge
 from rasterio.transform import array_bounds, rowcol
 
-LAKE_ID = "lungernsee"
+LAKE_ID = "hallwilersee"
 BATHY_URL = (
     f"https://data.geo.admin.ch/ch.swisstopo.swissbathy3d/swissbathy3d_{LAKE_ID}/"
     f"swissbathy3d_{LAKE_ID}_2056_5728.xyz.zip"

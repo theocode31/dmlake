@@ -14,19 +14,28 @@ Avant de pouvoir extraire des features de relief (pente, distance au rivage...),
 Aujourd'hui , on fait une extraction des features de relief. D'abord un masque d'eau (enveloppe convexe des points bathy rasterisée sur la grille du MNT, suffisant pour un lac simple comme Lac de Joux, pas besoin du filtrage Sobel utilisé pour des lacs plus complexes). Puis, pour un échantillon de 2000 points du fond du lac, dans 8 directions (0 à 315°, pas de 45°), recherche du rivage (transition eau→terre dans le masque), puis prolongation du rayon sur terre pour mesurer pente et dénivelé à 4 distances (150/300/600/900m). resultat dans :lacdejoux_cross_shore_profiles
 
 09.07.2026
+Aujourd'hui, on réalie le premier modèle ML pour prédire la profondeur z à partir des features de relief du jour 3 (`train_model.py`). J'exclus `angle45`/`angle225` (~60% de NaN, axe aligné avec le grand axe du lac) et les flags `_shore_extrapolated`. Split 75/25, Random Forest car pour la majorité des cas environnementaux, on ne suit pas loi linéaire à cause de facteurs pluriels , pour un premeir essai, on ne vuet pas un modele avec des hyperparametre .
 
-Premier modèle ML pour prédire la profondeur à partir des features de relief du jour 3 (`train_model.py`). J'exclus `angle45`/`angle225` (~60% de NaN, axe aligné avec le grand axe du lac) et les flags `_shore_extrapolated`. Split 75/25, Random Forest.
-
-Premier essai : R²=0.957, mais fuite de données repérée — `angle0_z_DEM_ref` (= z − altitude du rivage) est quasi-linéairement dérivée de la cible elle-même et dominait l'importance des features à 50.7%. Chez Kacimi cette variable sert justement de cible alternative, pas de feature : je la retire.
+Premier essai : R²=0.957, mais fuite de données repérée avec `angle0_z_DEM_ref` (= z − altitude du rivage) est quasi-linéairement dérivée de la cible elle-même et dominait l'importance des features à 50.7%, je la retire.
 
 Deuxième essai (sans la fuite) : RMSE=2.60m, MAE=1.59m, R²=0.938. Feature importance dominée par les distances au rivage (angle180/270/135).
 
-Limite non résolue : le split est aléatoire par point sur un seul lac, donc les features spatiales (distances au rivage) agissent comme une quasi-empreinte de position (x,y) — le modèle peut interpoler un point de test proche d'un point d'entraînement plutôt que généraliser une vraie relation relief→profondeur. Kacimi évite ça en splittant par lac entier (`survey_id`), impossible ici avec un seul lac. Plutôt qu'un split spatial artificiel du Lac de Joux, je documente la limite et je testerai la généralisation avec un deuxième lac (entraînement sur un lac, test sur l'autre) une fois ses features extraites.
+Limite non résolue : le split est aléatoire par point sur un seul lac, donc les features spatiales (distances au rivage) agissent comme une quasi-empreinte de position (x,y), le modèle peut interpoler un point de test proche d'un point d'entraînement plutôt que généraliser une vraie relation relief→profondeur. On pourrait tester la généralisation avec un deuxième lac (entraînement sur un lac, test sur l'autre) une fois ses features extraites.
 
 13.07.2026
 
 Repris le point en suspens du jour 4, avec un deuxième lac cette fois : Lungernsee (plus profond que Lac de Joux, ~68m contre 31m, mais surface plus petite). Même pipeline relancé dessus sans souci, 2000 points, pas de NaN.
 
-Premier essai en gardant z comme cible : RMSE de 344m, du grand n'importe quoi. En fait logique, Lac de Joux est vers 1000m d'altitude et Lungernsee vers 650m, le modèle avait juste appris le niveau du lac d'entraînement, pas une vraie relation relief-profondeur.
+Premier essai en gardant z comme cible , on a RMSE de 344m, anormal. En fait logique, Lac de Joux est vers 1000m d'altitude et Lungernsee vers 650m, le modèle avait juste appris le niveau du lac d'entraînement, pas une vraie relation relief-profondeur.
 
-Repris avec angle0_z_DEM_ref comme cible (profondeur relative au rivage, comme chez Kacimi) au lieu de z. L'erreur redevient raisonnable (30-50m) mais le R² reste négatif dans les deux sens du train/test, donc pire que de prédire la moyenne. Avec seulement 2 lacs le modèle n'a pas de quoi apprendre une relation qui généralise vraiment. Résultat pas terrible mais pas étonnant non plus, il faudra clairement plus de lacs pour voir si ça marche. Je m'arrête là pour aujourd'hui.
+Repris avec angle0_z_DEM_ref comme cible  au lieu de z. L'erreur redevient raisonnable (30-50m) mais le R² reste négatif dans les deux sens du train/test, donc pire que de prédire la moyenne. Avec seulement 2 lacs le modèle n'a pas de quoi apprendre une relation qui généralise vraiment. Résultat pas terrible mais pas étonnant non plus, il faudra clairement plus de lacs pour voir si ça marche. Je m'arrête là pour aujourd'hui mais on va completer le test avec davantage d'exemples, les plus exotiques pour entrainer le mdoele au mieux.
+
+14.07.2026
+
+Ajouté 3 lacs de plus (aegerisee, baldeggersee, hallwilersee) pour avoir un vrai test a plusieurs lacs plutot que juste 2. Meme pipeline relancé sur chacun, aucun souci au telechargement/extraction.
+
+En nettoyant les donnees je me rends compte que l'exclusion angle45/angle225, decidee a l'origine juste a cause de la geometrie de Lac de Joux, ne marche pas du tout pour les autres lacs : il ne reste que 91 points sur 2000 pour aegerisee apres dropna, 201 pour hallwilersee, 1054 pour baldeggersee (contre 2000 pour lacdejoux et lungernsee). Chaque lac a sans doute ses propres directions problematiques selon sa forme, pas forcement les memes que Lac de Joux.
+
+Test leave-one-lake-out (entrainement sur 4 lacs, test sur le 5e, a tour de role), toujours avec angle0_z_DEM_ref comme cible : R²=0.149 pour lacdejoux, -0.751 pour lungernsee, -212 pour aegerisee (mais seulement 91 points de test, donc pas fiable), -0.770 pour baldeggersee, 0.090 pour hallwilersee. Toujours pas de vraie generalisation, un peu mieux que le test a 2 lacs sur certains, pire sur d'autres.
+
+Deux pistes a corriger avant de retenter : l'exclusion d'angles fixe qui ne convient qu'a Lac de Joux (a refaire par lac), et la perte de points qui en decoule sur certains lacs. 

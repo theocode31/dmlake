@@ -8,6 +8,7 @@ FEATURES_CSV = "outputs/lacdejoux_features.csv"
 EXCLUDED_ANGLES = [45, 225]  # axe aligne avec le grand axe du lac, ~60% de NaN
 NON_FEATURE_COLS = ["x", "y", "z", "survey_id"]
 DEPTH_TARGET_COL = "angle0_z_DEM_ref"  # profondeur relative au rivage -- cf load_dataset_for
+LAKES = ["lacdejoux", "lungernsee", "aegerisee", "baldeggersee", "hallwilersee"]
 RANDOM_STATE = 42
 
 
@@ -89,21 +90,20 @@ def main() -> None:
     print("\nTop 10 features (importance Random Forest) :")
     print(importances.head(10))
 
-    # Test de generalisation : train sur un lac, test sur l'autre (cf limite documentee
-    # au jour 4 -- le split aleatoire ci-dessus, sur un seul lac, est optimiste car les
-    # features spatiales font office de quasi-empreinte de position).
-    #
-    # Cible = DEPTH_TARGET_COL (profondeur relative au rivage), pas z (altitude absolue) :
-    # un premier essai avec z donnait RMSE~344m d'un lac a l'autre, simplement parce que
-    # Lac de Joux (~1000m d'altitude) et Lungernsee (~650m) n'ont pas la meme altitude de
-    # base -- z absolu n'a aucun sens a comparer entre deux lacs.
-    lacdejoux_df = load_dataset_for("lacdejoux")
-    lungernsee_df = load_dataset_for("lungernsee")
-    print(f"\nlacdejoux: {len(lacdejoux_df)} lignes, lungernsee: {len(lungernsee_df)} lignes apres nettoyage")
+    # Test de generalisation, leave-one-lake-out sur LAKES : train sur tous les lacs sauf
+    # un, test sur celui laisse de cote, a tour de role. Cible = DEPTH_TARGET_COL (profondeur
+    # relative au rivage), pas z (altitude absolue) : un premier essai avec z donnait
+    # RMSE~344m d'un lac a l'autre, simplement parce que Lac de Joux (~1000m d'altitude) et
+    # Lungernsee (~650m) n'ont pas la meme altitude de base -- z absolu n'a aucun sens a
+    # comparer entre deux lacs.
+    datasets = {lake_id: load_dataset_for(lake_id) for lake_id in LAKES}
+    for lake_id, d in datasets.items():
+        print(f"{lake_id}: {len(d)} lignes apres nettoyage")
 
     cross_feature_cols = [c for c in feature_cols if c != DEPTH_TARGET_COL]
-    evaluate(lacdejoux_df, lungernsee_df, cross_feature_cols, DEPTH_TARGET_COL, "train=lacdejoux / test=lungernsee")
-    evaluate(lungernsee_df, lacdejoux_df, cross_feature_cols, DEPTH_TARGET_COL, "train=lungernsee / test=lacdejoux")
+    for test_id in LAKES:
+        train_df = pd.concat([d for lid, d in datasets.items() if lid != test_id], ignore_index=True)
+        evaluate(train_df, datasets[test_id], cross_feature_cols, DEPTH_TARGET_COL, f"train=autres lacs / test={test_id}")
 
 
 if __name__ == "__main__":
