@@ -41,7 +41,7 @@ from fetch_dem import (
 ANGLES = [0, 45, 90, 135, 180, 225, 270, 315]
 DISTANCES = [150, 300, 600, 900]
 STEP = 2.0  # colle a la resolution du MNT
-MAX_SHORE_SEARCH = 2500.0  # coherent avec la couronne de 1km ajoutee au jour 2
+SHORE_SEARCH_MARGIN = 1.1  # marge de securite sur la diagonale du lac (voir main())
 N_SAMPLE = 2000
 NODATA = -9999.0
 
@@ -80,11 +80,11 @@ def sample_along_ray(x0, y0, angle_deg, max_dist, step, arr, transform, fill_val
     return dists, vals, inside
 
 
-def extract_point_features(x0, y0, z_bed, mask, dem, transform):
+def extract_point_features(x0, y0, z_bed, mask, dem, transform, max_shore_search):
     rec = {"x": x0, "y": y0, "z": z_bed}
     for angle in ANGLES:
         dists, vals, inside = sample_along_ray(
-            x0, y0, angle, MAX_SHORE_SEARCH, STEP, mask, transform, fill_value=0
+            x0, y0, angle, max_shore_search, STEP, mask, transform, fill_value=0
         )
         land_idx = np.argmax(vals == 0)
         if vals[land_idx] != 0:
@@ -136,9 +136,18 @@ def plot_sanity_check(mosaic, transform, mask, sample_df, hull_poly):
     que la methode fait ce qu'on croit."""
     fig, ax = plt.subplots(figsize=(8, 6))
     left, bottom, right, top = array_bounds(mosaic.shape[0], mosaic.shape[1], transform)
-    ax.imshow(mosaic, cmap="terrain", extent=(left, right, bottom, top), origin="upper", alpha=0.8)
+
+    # Sous-echantillonne l'affichage pour les tres grandes mosaiques (Bodensee/Leman
+    # font des dizaines de milliers de pixels de cote -- trop pour matplotlib en
+    # memoire). L'extraction de features, elle, utilise deja le mosaic complet plus
+    # haut ; seul cet apercu visuel est degrade.
+    stride = max(1, max(mosaic.shape) // 2000)
+    mosaic_disp = mosaic[::stride, ::stride]
+    mask_disp = mask[::stride, ::stride]
+
+    ax.imshow(mosaic_disp, cmap="terrain", extent=(left, right, bottom, top), origin="upper", alpha=0.8)
     ax.contour(
-        mask,
+        mask_disp,
         levels=[0.5],
         colors="blue",
         extent=(left, right, bottom, top),
@@ -180,15 +189,29 @@ def main() -> None:
 
     mask, hull_poly = build_water_mask(bathy_df, mosaic.shape, transform)
     surface_area_ha = hull_poly.area / 10000.0
-    print(f"Masque d'eau construit. Surface (enveloppe convexe) = {surface_area_ha:.1f} ha")
+    # coefficient isoperimetrique (compacite de la forme, 4piA/P^2, 1 = cercle parfait) --
+    # feature suggeree par Kacimi (rapport de stage) pour remplacer surface_area, qui
+    # dominait l'importance des features sans bien generaliser (jour 7).
+    isoperimetric_coeff = 4 * np.pi * hull_poly.area / hull_poly.length**2
+    print(f"Masque d'eau construit. Surface (enveloppe convexe) = {surface_area_ha:.1f} ha, coefficient isoperimetrique = {isoperimetric_coeff:.4f}")
+
+    # Rayon de recherche du rivage adapte a la taille du lac : la diagonale de son
+    # emprise (bathy_df) borne la distance max entre un point du fond et le rivage,
+    # quelle que soit la direction -- avec une marge de securite. Un rayon fixe
+    # (2500m, jour 3) etait trop court pour les lacs allonges (jusqu'a 64% de NaN
+    # sur l'axe le plus long, decouvert au jour 6 en comparant plusieurs lacs).
+    diag = np.hypot(bathy_df.x.max() - bathy_df.x.min(), bathy_df.y.max() - bathy_df.y.min())
+    max_shore_search = diag * SHORE_SEARCH_MARGIN
+    print(f"Rayon de recherche du rivage : {max_shore_search:.0f} m (diagonale du lac = {diag:.0f} m)")
 
     sample_df = bathy_df.sample(n=min(N_SAMPLE, len(bathy_df)), random_state=42).reset_index(drop=True)
     print(f"Extraction des features sur {len(sample_df)} points echantillonnes...")
 
     records = []
     for i, row in sample_df.iterrows():
-        rec = extract_point_features(row.x, row.y, row.z, mask, mosaic, transform)
+        rec = extract_point_features(row.x, row.y, row.z, mask, mosaic, transform, max_shore_search)
         rec["surface_area"] = surface_area_ha
+        rec["isoperimetric_coeff"] = isoperimetric_coeff
         rec["survey_id"] = LAKE_ID
         records.append(rec)
         if (i + 1) % 500 == 0:
