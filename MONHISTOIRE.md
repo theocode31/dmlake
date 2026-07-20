@@ -71,6 +71,24 @@ Leave-one-lake-out relancé sur 21 lacs , on a 7 lacs sur 21 en R² positif. Mai
 
 Le cas de L9 donne une idée pour corriger le problème d'échelle que l'on a autant eu, au lieu de faire deviner au modèle la profondeur en mètres (qui varie énormément d'un lac à l'autre, de 6m à 260m), je lui fais deviner un ratio sans unité avec profondeur du point / profondeur max de ce lac-là. Un point au fond du lac le plus profond de son lac vaudrait 1, un point tout près du bord vaudrait proche de 0, peu importe que le lac fasse 6m ou 260m de profond, le ratio reste comparable. L'idée est de décorréler "à quel point ce point est profond par rapport à son propre lac" de "quelle est la profondeur totale de ce lac", pour que le modèle n'ait plus à deviner une échelle qu'il n'a jamais vue.
 
-Relance du leave-one-lake-out avec cette cible normalisée à la place de la profondeur brute, nette amélioration, 15 lacs sur 21 ont maintenant un R² positif (contre 7 avant). Le cas L9 (catastrophique avant, R²=-171) remonte à -0.12. Brienzersee (trop profond) passe de -0.83 à +0.07. Ça confirme que la relation "forme du relief autour de la position relative en profondeur dans le lac" se généralise plutôt bien d'un lac à l'autre, une fois qu'on retire le problème d'échelle. On verra demain pour la suite.
+Relance du leave-one-lake-out avec cette cible normalisée à la place de la profondeur brute, nette amélioration, 15 lacs sur 21 ont maintenant un R² positif (contre 7 avant). Le cas L9 (catastrophique avant, R²=-171) remonte à -0.12. Brienzersee (trop profond) passe de -0.83 à +0.07. Ça confirme que la relation "forme du relief autour de la position relative en profondeur dans le lac" se généralise plutôt bien d'un lac à l'autre, une fois qu'on retire le problème d'échelle.
+
+20.07.2026
+surface_area  écrase tout et pose souci, surtout cela pose biais vers les lacs peu profonds. La parade trouvée serait d'utiliser un coefficient isopérimétrique (compacité du lac, indépendant de la taille). On a ajouté ce coefficient isopérimétrique côté suisse. Testé en trois versions : sans rien (R² moyen -0.293), avec `surface_area` en plus (-0.313, pire), isopérimétrique seul sans `surface_area` (-0.184, le meilleur). 
+
+Relancé le test complet sur les 21 lacs avec cette config gagnanten cependant, seulement 5 lacs sur 21 en R² positif, contre 15 avant. Testé en gardant `surface_area` comme avant mais sur les données françaises actuelles, toujours mauvais. Donc le souci vient des données françaises, pas du choix de feature. On verra comment s'y prendre pour la suite, car cela devient assez compliqué.
+
+
+Avant, pour les lacs français, on prenait l'enveloppe convexe des points de mesure. Mais ur un lac tout en longueur ou avec des bras qui partent dans plusieurs directions (comme une vallée noyée), cet élastique passe au-dessus de bouts de terre entre les bras du lac. Le modèle croyait que certaines zones de terre étaient de l'eau, ce qui faussait toutes les distances au rivage et les pentes calculées autour. On est passé à une méthode qui regarde directement le relief (le MNT) et détecte les zones plates (l'eau est plate, la terre autour ne l'est pas), beaucoup plus fidèle à la vraie forme du lac, peu importe qu'il soit tordu ou ramifié. C'est donc la méthode du masque de Sobel qui detecte les contours
+
+Les 4 lacs français qui avaient l'écart le plus flagrant entre l'ancien masque et la vraie forme (L1, L30, L60, L90) sont passés de très négatifs (jusqu'à R²=-1.12 pour L1) à nettement positifs (jusqu'à +0.49). C'était bien le masque le problème, pas les données françaises en elles-mêmes ni le choix de features.
+
+lungernsee, bielersee, lacneuchatel, lagomaggiore et L9 restent négatifs ce sont exactement les lacs qu'on avait déjà identifiés il y a quelques jours comme ayant un problème différent, leur profondeur sort trop de la plage "normale" des autres lacs (bielersee/lacneuchatel/lagomaggiore sont beaucoup plus profonds que la moyenne, L9 est anormalement peu profond). Le modèle n'a jamais vu d'exemples à cette échelle-là pendant l'entraînement, donc il ne sait pas extrapoler, c'est le problème d'échelle qu'on documente depuis le jour 16, pas un nouveau bug.
+
+
+
+
+
+
 
 
