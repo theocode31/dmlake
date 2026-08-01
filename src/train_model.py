@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
 
@@ -177,6 +178,145 @@ def main() -> None:
     for test_id in LAKES:
         train_df = pd.concat([d for lid, d in datasets.items() if lid != test_id], ignore_index=True)
         evaluate(train_df, datasets[test_id], surface_only_cols, DEPTH_RATIO_COL, f"[ISOLATION-surface] test={test_id}")
+
+    # Jour 21 -- le probleme d'echelle (jour 16-20) persiste meme avec depth_ratio : les lacs
+    # hors gamme de profondeur "normale" du jeu d'entrainement (lungernsee, bielersee,
+    # lacneuchatel, lagomaggiore, L9) restent en R2 negatif, parce que depth_ratio decouple la
+    # FORME (relief -> position relative dans le lac) de l'ECHELLE (profondeur max du lac), mais
+    # cette echelle n'est ensuite jamais reconstituee : on compare des ratios entre eux, jamais
+    # la profondeur reelle. Idee du jour 4 reprise ici : predire l'echelle separement, avec un
+    # second modele "macro" (une ligne par lac, pas par point), puis recombiner
+    # profondeur_predite = ratio_predit x echelle_predite. Verification prealable (corr. entre
+    # features macro et profondeur max reelle sur les 21 lacs) : mean_shore_dist=0.77,
+    # surface_area=0.61, isoperimetric_coeff=0.56, mean_elevdiff900=0.39 -- signal present,
+    # notamment sur la taille/forme du lac, plus faible sur le relief environnant.
+    print("\n\n=== Jour 21 : modele deux etages (echelle + forme) pour reconstituer la profondeur absolue ===")
+    scale_table = build_lake_scale_table(datasets)
+    scale_feature_cols = [c for c in scale_table.columns if c != "max_depth"]
+
+    scale_preds = {}
+    for test_id in LAKES:
+        train_scale = scale_table.drop(index=test_id)
+        # RF regularise (peu d'arbres, profondeur limitee) : seulement ~20 lignes en
+        # entrainement ici, un RF aussi permissif que celui utilise au niveau point (jour 9,
+        # max_depth=20) sur-apprendrait immediatement.
+        scale_model = RandomForestRegressor(
+            n_estimators=100, random_state=RANDOM_STATE, max_depth=4, min_samples_leaf=2
+        )
+        # cible en log : la profondeur max varie sur presque 2 ordres de grandeur (5.6m a
+        # 546m), un ecart absolu de qq metres compte beaucoup plus pour L9 (5.6m) que pour
+        # brienzersee (546m) -- cf. le meme raisonnement qui a motive depth_ratio au jour 16.
+        scale_model.fit(train_scale[scale_feature_cols], np.log(train_scale["max_depth"]))
+        pred_log = scale_model.predict(scale_table.loc[[test_id], scale_feature_cols])[0]
+        scale_preds[test_id] = np.exp(pred_log)
+
+    scale_summary = pd.DataFrame({
+        "max_depth_reel": scale_table["max_depth"],
+        "max_depth_predit": pd.Series(scale_preds),
+    })
+    scale_summary["erreur_pct"] = (
+        (scale_summary["max_depth_predit"] - scale_summary["max_depth_reel"]) / scale_summary["max_depth_reel"] * 100
+    )
+    print("\nEtage 1 (echelle), leave-one-lake-out :")
+    print(scale_summary.round(1))
+
+    # Etage 2 : reprend le meme modele depth_ratio que le test [FINAL] ci-dessus (LOLO,
+    # ratio_feature_cols), mais cette fois on recombine avec l'echelle predite a l'etage 1
+    # pour obtenir une vraie profondeur en metres, comparable entre lacs. ratio_preds/depth_true
+    # sont mis en cache par lac pour ne pas re-entrainer ce RF (couteux, 200 arbres) une
+    # deuxieme fois plus bas pour la variante log-lineaire de l'etage 1.
+    print("\nModele combine (echelle etage 1 RF x ratio etage 2), profondeur absolue :")
+    problem_lakes = ["lungernsee", "bielersee", "lacneuchatel", "lagomaggiore", "L9"]
+    ratio_preds, depth_trues = {}, {}
+    for test_id in LAKES:
+        train_df = pd.concat([d for lid, d in datasets.items() if lid != test_id], ignore_index=True)
+        model = RandomForestRegressor(n_estimators=200, random_state=RANDOM_STATE, n_jobs=-1, max_depth=20)
+        model.fit(train_df[all_feature_cols], train_df[DEPTH_RATIO_COL])
+        ratio_pred = model.predict(datasets[test_id][all_feature_cols])
+        ratio_preds[test_id] = ratio_pred
+        depth_trues[test_id] = datasets[test_id][DEPTH_TARGET_COL].abs()
+
+        depth_true = depth_trues[test_id]
+        depth_pred_combined = ratio_pred * scale_preds[test_id]
+        depth_pred_ratio_only = ratio_pred * scale_table.loc[test_id, "max_depth"]  # oracle : vraie echelle
+
+        r2_combined = r2_score(depth_true, depth_pred_combined)
+        rmse_combined = root_mean_squared_error(depth_true, depth_pred_combined)
+        r2_oracle = r2_score(depth_true, depth_pred_ratio_only)
+        flag = " <-- lac probleme" if test_id in problem_lakes else ""
+        print(
+            f"{test_id:15s} combine: R2={r2_combined:7.3f} RMSE={rmse_combined:7.2f}m | "
+            f"oracle (vraie echelle): R2={r2_oracle:7.3f}{flag}"
+        )
+
+    # Variante etage 1 : regression log-lineaire au lieu du RF. Un RF predit une moyenne de
+    # feuilles vues a l'entrainement, donc ne peut jamais sortir de [min, max] des profondeurs
+    # d'entrainement -- explique l'echec sur L9 (le plus petit lac exclu -> plancher impose par
+    # le lac suivant le plus petit). Une regression lineaire log(surface)->log(profondeur), en
+    # revanche, extrapole nativement le long de la droite ajustee -- c'est la relation
+    # d'echelle classique utilisee en limnologie (loi de puissance aire/profondeur).
+    print("\n\n=== Variante etage 1 : regression log-lineaire (extrapole, contrairement au RF) ===")
+    loglinear_cols = ["surface_area", "mean_shore_dist"]  # les 2 plus correlees a max_depth (0.61 et 0.77)
+    scale_table_log = scale_table.copy()
+    scale_table_log[loglinear_cols] = np.log(scale_table_log[loglinear_cols])
+
+    scale_preds_loglinear = {}
+    for test_id in LAKES:
+        train_scale = scale_table_log.drop(index=test_id)
+        lin_model = LinearRegression()
+        lin_model.fit(train_scale[loglinear_cols], np.log(train_scale["max_depth"]))
+        pred_log = lin_model.predict(scale_table_log.loc[[test_id], loglinear_cols])[0]
+        scale_preds_loglinear[test_id] = np.exp(pred_log)
+
+    scale_summary_log = pd.DataFrame({
+        "max_depth_reel": scale_table["max_depth"],
+        "max_depth_predit": pd.Series(scale_preds_loglinear),
+    })
+    scale_summary_log["erreur_pct"] = (
+        (scale_summary_log["max_depth_predit"] - scale_summary_log["max_depth_reel"])
+        / scale_summary_log["max_depth_reel"] * 100
+    )
+    print("\nEtage 1 (echelle log-lineaire), leave-one-lake-out :")
+    print(scale_summary_log.round(1))
+
+    print("\nModele combine (echelle etage 1 log-lineaire x ratio etage 2), profondeur absolue :")
+    for test_id in LAKES:
+        depth_true = depth_trues[test_id]
+        depth_pred_combined = ratio_preds[test_id] * scale_preds_loglinear[test_id]
+        r2_combined = r2_score(depth_true, depth_pred_combined)
+        rmse_combined = root_mean_squared_error(depth_true, depth_pred_combined)
+        flag = " <-- lac probleme" if test_id in problem_lakes else ""
+        print(f"{test_id:15s} combine: R2={r2_combined:7.3f} RMSE={rmse_combined:7.2f}m{flag}")
+
+    # Resultat : pire que le RF, pas mieux. L9 (5.6m reel) predit a 100.7m (+1711%, contre
+    # +636% avec le RF). L'hypothese "le RF ne peut pas extrapoler, un modele lineaire le
+    # peut" etait correcte en theorie mais ne suffit pas ici en pratique : avec seulement ~20
+    # lacs tres heterogenes (pipelines CH/FR differents, profondeur de 5.6m a 546m, donc 2
+    # ordres de grandeur), un ajustement log-log sur 2 features suffit a peine a capter la
+    # tendance generale, et sous leave-one-lake-out chaque lac exclu peut faire basculer la
+    # pente de la droite. En espace log, une petite erreur de pente se traduit par une erreur
+    # enorme une fois repassee en metres (exp()). Le probleme n'est donc pas le choix RF vs
+    # lineaire, mais le manque de lacs pour estimer une relation d'echelle fiable -- 20 lacs,
+    # c'est trop peu pour une regression a l'echelle du lac, meme simple.
+def build_lake_scale_table(datasets: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Une ligne par lac : features macro (taille, forme, relief moyen alentour) +
+    profondeur max reelle. Sert a l'etage 1 du modele du jour 21 (predire l'echelle du
+    lac independamment de la forme relief->profondeur traitee par depth_ratio)."""
+    elevdiff900_cols = [c for c in next(iter(datasets.values())).columns if "elevdiff900" in c]
+    elevdiff300_cols = [c for c in next(iter(datasets.values())).columns if "elevdiff300" in c]
+    dist_cols = [c for c in next(iter(datasets.values())).columns if c.endswith("shoreline_distance")]
+
+    rows = {}
+    for lake_id, df in datasets.items():
+        rows[lake_id] = {
+            "surface_area": df["surface_area"].iloc[0],
+            "isoperimetric_coeff": df["isoperimetric_coeff"].iloc[0],
+            "mean_elevdiff900": df[elevdiff900_cols].mean().mean(),
+            "mean_elevdiff300": df[elevdiff300_cols].mean().mean(),
+            "mean_shore_dist": df[dist_cols].mean().mean(),
+            "max_depth": df[DEPTH_TARGET_COL].abs().max(),
+        }
+    return pd.DataFrame.from_dict(rows, orient="index")
 
 
 if __name__ == "__main__":

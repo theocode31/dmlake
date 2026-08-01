@@ -86,9 +86,15 @@ Les 4 lacs français qui avaient l'écart le plus flagrant entre l'ancien masque
 lungernsee, bielersee, lacneuchatel, lagomaggiore et L9 restent négatifs ce sont exactement les lacs qu'on avait déjà identifiés il y a quelques jours comme ayant un problème différent, leur profondeur sort trop de la plage "normale" des autres lacs (bielersee/lacneuchatel/lagomaggiore sont beaucoup plus profonds que la moyenne, L9 est anormalement peu profond). Le modèle n'a jamais vu d'exemples à cette échelle-là pendant l'entraînement, donc il ne sait pas extrapoler, c'est le problème d'échelle qu'on documente depuis le jour 16, pas un nouveau bug.
 
 
+01.08.2026
 
+Apres une petite période, on reprend le problème d'échelle avant (les lacs hors gamme de profondeur normale restent en R² négatif). Notre but aujourd'hui et de réparer la prédiction en deux étages, un modèle "échelle" (profondeur max du lac, une ligne par lac) et le modèle "forme" (depth_ratio) existant, recombinés ensuite. 
 
+Étage 1 avec un Random Forest , échec, catastrophique sur L9 (profondeur prédite 41m contre 5.6m réels, +636%). Cause : un RF ne peut jamais prédire hors de la plage de profondeurs vues à l'entraînement, or L9 est le lac le plus petitdès qu'on l'exclut, tous les lacs restants font au moins 16m.
 
+Essayé avec une régression log-linéaire à la place (log(surface)->log(profondeur), capable d'extrapoler contrairement au RF) : encore pire (L9 prédit à 100.7m, +1711%). Avec seulement ~20 lacs très hétérogènes (pipelines CH/FR différents, profondeur de 5.6 à 546m soit deux ordres de grandeur), la droite log-log est trop instable en leave-one-lake-out, et une petite erreur de pente devient énorme une fois repassée en mètres.
+
+Autre découverte au passage (colonne "oracle", même modèle de forme mais avec la vraie échelle) : même en donnant la vraie profondeur max, 4 lacs problématiques sur 5 restent en R² négatif. Le problème n'est donc pas seulement l'échelle, la relation forme-relief -> profondeur relative elle-même ne généralise pas vers ces lacs-là. Séparer échelle et forme était une bonne intuition mais ne suffit pas à la quantité de données actuelle (~20 lacs) , il faudrait plus de lacs
 
 
 
