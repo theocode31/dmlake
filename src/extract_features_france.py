@@ -1,12 +1,12 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import rasterio.features
 from rasterio.transform import rowcol, array_bounds
-from scipy.ndimage import sobel
-from shapely.geometry import shape as shapely_shape
 
-from fetch_dem_france import LAKE_ID, OUTPUT_DIR, download_bathymetry, fetch_dem
+from fetch_dem_france import LAKE_ID, OUTPUT_DIR, telecharger_bathymetrie, recuperer_mnt
+# masque de Sobel (methode de Kacimi, 20/07), deplace dans masque_eau.py pour que le
+# cote suisse utilise le meme. Le resultat cote francais ne change pas.
+from masque_eau import construire_masque_eau, points_dans_masque
 
 ANGLES = [0, 45, 90, 135, 180, 225, 270, 315]
 DISTANCES = [150, 300, 600, 900]
@@ -14,41 +14,9 @@ STEP = 5.0  # colle a la resolution de RGE ALTI (vs 2.0 pour swissALTI3D)
 SHORE_SEARCH_MARGIN = 1.1
 N_SAMPLE = 2000
 NODATA = -9999.0
-SOBEL_THRESHOLD = 0.2
 
 
-def build_water_mask(dem: np.ndarray, transform):
-    """Masque d'eau par filtre de Sobel sur le MNT (methode de Kacimi) : les
-    surfaces d'eau sont quasi planes (gradient faible), contrairement au
-    relief environnant. Remplace l'enveloppe convexe des points bathy (jour
-    17) -- celle-ci englobe trop de terre sur les lacs a forme irreguliere
-    (verifie sur L1/L30/L60/L90, tres concaves, qui degradaient le plus le
-    leave-one-lake-out)."""
-    valid = ~np.isnan(dem)
-    filled = np.where(valid, dem, np.nanmean(dem[valid]))
-    dx = sobel(filled, axis=1)
-    dy = sobel(filled, axis=0)
-    magnitude = np.sqrt(dx**2 + dy**2) / 8.0
-    water = ((~valid) | (magnitude < SOBEL_THRESHOLD)).astype("uint8")
-
-    polys = [
-        shapely_shape(geom)
-        for geom, val in rasterio.features.shapes(water, mask=(water == 1), transform=transform)
-    ]
-    lake_poly = max(polys, key=lambda p: p.area)
-    # le contour polygonise suit la grille pixel par pixel (effet "escalier"), ce qui gonfle
-    # artificiellement le perimetre sans changer l'aire -- simplifie (tolerance = 2 pixels)
-    # pour que le coefficient isoperimetrique reste interpretable.
-    pixel_size = abs(transform.a)
-    lake_poly = lake_poly.simplify(2 * pixel_size, preserve_topology=True)
-
-    mask = rasterio.features.rasterize(
-        [(lake_poly, 1)], out_shape=dem.shape, transform=transform, fill=0, dtype="uint8"
-    )
-    return mask, lake_poly
-
-
-def sample_along_ray(x0, y0, angle_deg, max_dist, step, arr, transform, fill_value):
+def echantillonner_rayon(x0, y0, angle_deg, max_dist, step, arr, transform, fill_value):
     theta = np.radians(angle_deg)
     dxu, dyu = np.sin(theta), np.cos(theta)
     n = int(max_dist / step)
@@ -64,14 +32,14 @@ def sample_along_ray(x0, y0, angle_deg, max_dist, step, arr, transform, fill_val
     return dists, vals, inside
 
 
-def extract_point_features(x0, y0, z_bed, mask, dem, transform, max_shore_search):
+def extraire_features_point(x0, y0, z_bed, mask, dem, transform, max_shore_search):
     rec = {"x": x0, "y": y0, "z": z_bed}
     # z_bed est deja une profondeur mesuree (EauFrance : "bathy_profondeurs.xyz"), pas
     # une altitude absolue comme cote suisse -- pas besoin de la corriger avec l'altitude
     # du rivage, elle sert directement de cible (cf angle0_z_DEM_ref cote suisse).
     rec["angle0_z_DEM_ref"] = z_bed
     for angle in ANGLES:
-        dists, vals, inside = sample_along_ray(
+        dists, vals, inside = echantillonner_rayon(
             x0, y0, angle, max_shore_search, STEP, mask, transform, fill_value=0
         )
         land_idx = np.argmax(vals == 0)
@@ -88,7 +56,7 @@ def extract_point_features(x0, y0, z_bed, mask, dem, transform, max_shore_search
         shore_y = y0 + np.cos(theta) * shore_dist
         rec[f"angle{angle}_shoreline_distance"] = shore_dist
 
-        pdists, pvals, pinside = sample_along_ray(
+        pdists, pvals, pinside = echantillonner_rayon(
             shore_x, shore_y, angle, max(DISTANCES), STEP, dem, transform, fill_value=NODATA
         )
         for d in DISTANCES:
@@ -104,7 +72,7 @@ def extract_point_features(x0, y0, z_bed, mask, dem, transform, max_shore_search
     return rec
 
 
-def plot_sanity_check(dem, transform, mask, sample_df, hull_poly):
+def tracer_verification(dem, transform, mask, sample_df, hull_poly):
     fig, ax = plt.subplots(figsize=(8, 6))
     left, bottom, right, top = array_bounds(dem.shape[0], dem.shape[1], transform)
     ax.imshow(dem, cmap="terrain", extent=(left, right, bottom, top), origin="upper", alpha=0.8)
@@ -133,13 +101,19 @@ def plot_sanity_check(dem, transform, mask, sample_df, hull_poly):
 
 
 def main() -> None:
-    bathy_df = download_bathymetry()
+    bathy_df = telecharger_bathymetrie()
     print(f"{len(bathy_df)} points bathymetriques")
 
-    dem, transform = fetch_dem(bathy_df)
+    dem, transform = recuperer_mnt(bathy_df)
     print(f"MNT : {dem.shape}")
 
-    mask, hull_poly = build_water_mask(dem, transform)
+    # on garde la zone plate qui contient le plus de points bathy, et plus la plus grande
+    # zone plate de l'image : pour 22 lacs sur 98, la plus grande etait une autre zone
+    # (plaine, autre plan d'eau) et aucun point du lac ne tombait dedans
+    points_lac = bathy_df.sample(n=min(500, len(bathy_df)), random_state=42)
+    mask, hull_poly = construire_masque_eau(
+        dem, transform, nan_est_eau=True, points_x=points_lac.x.values, points_y=points_lac.y.values
+    )
     surface_area_ha = hull_poly.area / 10000.0
     isoperimetric_coeff = 4 * np.pi * hull_poly.area / hull_poly.length**2
     print(f"Masque d'eau construit. Surface = {surface_area_ha:.1f} ha, coefficient isoperimetrique = {isoperimetric_coeff:.4f}")
@@ -148,12 +122,18 @@ def main() -> None:
     max_shore_search = diag * SHORE_SEARCH_MARGIN
     print(f"Rayon de recherche du rivage : {max_shore_search:.0f} m (diagonale du lac = {diag:.0f} m)")
 
+    # on ne garde que les points dans le masque d'eau : hors du masque, le rayon part de la
+    # terre et toutes les distances au rivage valent 1 pixel (418 points sur 2000 pour L80 avant)
+    dans_lac = points_dans_masque(mask, transform, bathy_df.x.values, bathy_df.y.values)
+    print(f"{int(dans_lac.sum())} points dans le masque d'eau gardes sur {len(bathy_df)}")
+    bathy_df = bathy_df[dans_lac]
+
     sample_df = bathy_df.sample(n=min(N_SAMPLE, len(bathy_df)), random_state=42).reset_index(drop=True)
     print(f"Extraction des features sur {len(sample_df)} points echantillonnes...")
 
     records = []
     for i, row in sample_df.iterrows():
-        rec = extract_point_features(row.x, row.y, row.z, mask, dem, transform, max_shore_search)
+        rec = extraire_features_point(row.x, row.y, row.z, mask, dem, transform, max_shore_search)
         rec["surface_area"] = surface_area_ha
         rec["isoperimetric_coeff"] = isoperimetric_coeff
         rec["survey_id"] = LAKE_ID
@@ -166,7 +146,7 @@ def main() -> None:
     out_df.to_csv(out_path, index=False)
     print(f"DONE. {len(out_df)} lignes, {out_df.shape[1]} colonnes -> {out_path}")
 
-    plot_sanity_check(dem, transform, mask, out_df.assign(x=sample_df.x, y=sample_df.y), hull_poly)
+    tracer_verification(dem, transform, mask, out_df.assign(x=sample_df.x, y=sample_df.y), hull_poly)
 
 
 if __name__ == "__main__":

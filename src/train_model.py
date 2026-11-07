@@ -6,7 +6,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
 
 FEATURES_CSV = "outputs/lacdejoux_features.csv"
-EXCLUDED_ANGLES = []  # obsolete depuis jour 6 (rayon dynamique)
+EXCLUDED_ANGLES = []  # obsolete depuis le 14/07 (rayon dynamique)
 NON_FEATURE_COLS = ["x", "y", "z", "survey_id"]
 DEPTH_TARGET_COL = "angle0_z_DEM_ref"  # profondeur relative au rivage
 DEPTH_RATIO_COL = "depth_ratio"  # profondeur normalisee par la profondeur max du lac
@@ -23,12 +23,12 @@ LAKES_FR = [
     "L74", "L76", "L77", "L78", "L79", "L80", "L81", "L82", "L83", "L84", "L85", "L86", "L87",
     "L88", "L89", "L90", "L91", "L93", "L94", "L95", "L96", "L97", "L98", "L99", "L100", "L101",
     "L102", "L103", "L104", "L105", "L106", "L107",
-]  # jour 21 : elargi 12->98 lacs, 8 exclus (donnees source corrompues)
+]  # 03/08 : elargi 12->98 lacs, 8 exclus (donnees source corrompues)
 LAKES = LAKES_CH + LAKES_FR
 RANDOM_STATE = 42
 
 
-def load_dataset() -> pd.DataFrame:
+def charger_donnees() -> pd.DataFrame:
     df = pd.read_csv(FEATURES_CSV)
     drop_cols = [c for c in df.columns if any(c.startswith(f"angle{a}_") for a in EXCLUDED_ANGLES)]
     df = df.drop(columns=drop_cols)
@@ -38,21 +38,18 @@ def load_dataset() -> pd.DataFrame:
     return df
 
 
-def load_dataset_for(lake_id: str) -> pd.DataFrame:
-    """Comme load_dataset(), mais pour un lac quelconque, et garde
-    DEPTH_TARGET_COL (retire par load_dataset()) -- utilise pour le test de
-    generalisation cross-lac (train sur un lac, test sur l'autre)."""
+def charger_donnees_lac(lake_id: str) -> pd.DataFrame:
     df = pd.read_csv(f"outputs/{lake_id}_features.csv")
     drop_cols = [c for c in df.columns if any(c.startswith(f"angle{a}_") for a in EXCLUDED_ANGLES)]
     df = df.drop(columns=drop_cols)
     extrap_cols = [c for c in df.columns if c.endswith("_shore_extrapolated")]
     df = df.drop(columns=extrap_cols)
     df = df.dropna()
-    df[DEPTH_RATIO_COL] = df[DEPTH_TARGET_COL] / df[DEPTH_TARGET_COL].min()  # normalise par profondeur max (jour 7)
+    df[DEPTH_RATIO_COL] = df[DEPTH_TARGET_COL] / df[DEPTH_TARGET_COL].min()  # normalise par profondeur max (16/07)
     return df
 
 
-def evaluate(train_df: pd.DataFrame, test_df: pd.DataFrame, feature_cols: list[str], target_col: str, label: str) -> None:
+def evaluer(train_df: pd.DataFrame, test_df: pd.DataFrame, feature_cols: list[str], target_col: str, label: str) -> None:
     X_train, y_train = train_df[feature_cols], train_df[target_col]
     X_test, y_test = test_df[feature_cols], test_df[target_col]
 
@@ -72,7 +69,7 @@ def evaluate(train_df: pd.DataFrame, test_df: pd.DataFrame, feature_cols: list[s
 
 
 def main() -> None:
-    df = load_dataset()
+    df = charger_donnees()
     print(f"{len(df)} lignes, {df.shape[1]} colonnes")
 
     before = len(df)
@@ -102,61 +99,61 @@ def main() -> None:
     print("\nTop 10 features (importance Random Forest) :")
     print(importances.head(10))
 
-    # leave-one-lake-out, cible=DEPTH_TARGET_COL (z absolu ne marche pas, jour 5)
-    datasets = {lake_id: load_dataset_for(lake_id) for lake_id in LAKES}
+    # leave-one-lake-out, cible=DEPTH_TARGET_COL (z absolu ne marche pas, 13/07)
+    datasets = {lake_id: charger_donnees_lac(lake_id) for lake_id in LAKES}
     for lake_id, d in datasets.items():
         print(f"{lake_id}: {len(d)} lignes apres nettoyage")
 
     cross_feature_cols = [c for c in feature_cols if c not in (DEPTH_TARGET_COL, "isoperimetric_coeff")]  # iso exclu (CH seulement)
     for test_id in LAKES:
         train_df = pd.concat([d for lid, d in datasets.items() if lid != test_id], ignore_index=True)
-        evaluate(train_df, datasets[test_id], cross_feature_cols, DEPTH_TARGET_COL, f"train=autres lacs / test={test_id}")
+        evaluer(train_df, datasets[test_id], cross_feature_cols, DEPTH_TARGET_COL, f"train=autres lacs / test={test_id}")
 
-    print("\n\n=== Meme test, cible normalisee (depth_ratio) ===")  # decouple forme et echelle (jour 16)
+    print("\n\nMeme test, cible normalisee (depth_ratio)")  # decouple forme et echelle (16/07)
     ratio_feature_cols = [c for c in cross_feature_cols if c != DEPTH_RATIO_COL]
     for test_id in LAKES:
         train_df = pd.concat([d for lid, d in datasets.items() if lid != test_id], ignore_index=True)
-        evaluate(train_df, datasets[test_id], ratio_feature_cols, DEPTH_RATIO_COL, f"[ratio] train=autres lacs / test={test_id}")
+        evaluer(train_df, datasets[test_id], ratio_feature_cols, DEPTH_RATIO_COL, f"[ratio] train=autres lacs / test={test_id}")
 
-    # isoperimetric_coeff, lacs CH seulement (jour 8, piste Kacimi)
+    # isoperimetric_coeff, lacs CH seulement (20/07, piste Kacimi)
     ch_datasets = {lid: d for lid, d in datasets.items() if lid in LAKES_CH}
     ch_feature_cols = [c for c in ch_datasets["lacdejoux"].columns if c not in NON_FEATURE_COLS + [DEPTH_TARGET_COL, DEPTH_RATIO_COL]]
     baseline_cols = [c for c in ch_feature_cols if c != "isoperimetric_coeff"]
     with_surface_cols = ch_feature_cols
     without_surface_cols = [c for c in ch_feature_cols if c != "surface_area"]
 
-    print("\n\n=== Lacs suisses seuls, baseline SANS isoperimetric_coeff ===")
+    print("\n\nLacs suisses seuls, baseline SANS isoperimetric_coeff")
     for test_id in LAKES_CH:
         train_df = pd.concat([d for lid, d in ch_datasets.items() if lid != test_id], ignore_index=True)
-        evaluate(train_df, ch_datasets[test_id], baseline_cols, DEPTH_RATIO_COL, f"[CH-baseline] test={test_id}")
+        evaluer(train_df, ch_datasets[test_id], baseline_cols, DEPTH_RATIO_COL, f"[CH-baseline] test={test_id}")
 
-    print("\n\n=== Lacs suisses seuls, avec surface_area ET isoperimetric_coeff ===")
+    print("\n\nLacs suisses seuls, avec surface_area ET isoperimetric_coeff")
     for test_id in LAKES_CH:
         train_df = pd.concat([d for lid, d in ch_datasets.items() if lid != test_id], ignore_index=True)
-        evaluate(train_df, ch_datasets[test_id], with_surface_cols, DEPTH_RATIO_COL, f"[CH+iso] test={test_id}")
+        evaluer(train_df, ch_datasets[test_id], with_surface_cols, DEPTH_RATIO_COL, f"[CH+iso] test={test_id}")
 
-    print("\n\n=== Lacs suisses seuls, isoperimetric_coeff SANS surface_area ===")
+    print("\n\nLacs suisses seuls, isoperimetric_coeff SANS surface_area")
     for test_id in LAKES_CH:
         train_df = pd.concat([d for lid, d in ch_datasets.items() if lid != test_id], ignore_index=True)
-        evaluate(train_df, ch_datasets[test_id], without_surface_cols, DEPTH_RATIO_COL, f"[CH+iso-nosurf] test={test_id}")
+        evaluer(train_df, ch_datasets[test_id], without_surface_cols, DEPTH_RATIO_COL, f"[CH+iso-nosurf] test={test_id}")
 
-    # jour 9 : config retenue, tous les lacs
+    # 20/07 : config retenue, tous les lacs
     all_feature_cols = [c for c in datasets["lacdejoux"].columns if c not in NON_FEATURE_COLS + [DEPTH_TARGET_COL, DEPTH_RATIO_COL, "surface_area"]]
-    print("\n\n=== Test final, 21 lacs (9 CH + 12 FR), depth_ratio + isoperimetric_coeff sans surface_area ===")
+    print("\n\nTest final, 21 lacs (9 CH + 12 FR), depth_ratio + isoperimetric_coeff sans surface_area")
     for test_id in LAKES:
         train_df = pd.concat([d for lid, d in datasets.items() if lid != test_id], ignore_index=True)
-        evaluate(train_df, datasets[test_id], all_feature_cols, DEPTH_RATIO_COL, f"[FINAL] test={test_id}")
+        evaluer(train_df, datasets[test_id], all_feature_cols, DEPTH_RATIO_COL, f"[FINAL] test={test_id}")
 
     # isole l'effet isoperimetric_coeff vs nouvelles donnees FR
     surface_only_cols = [c for c in all_feature_cols if c != "isoperimetric_coeff"] + ["surface_area"]
-    print("\n\n=== Isolation : 21 lacs, depth_ratio + surface_area (sans isoperimetric_coeff), nouvelles donnees FR ===")
+    print("\n\nIsolation : 21 lacs, depth_ratio + surface_area (sans isoperimetric_coeff), nouvelles donnees FR")
     for test_id in LAKES:
         train_df = pd.concat([d for lid, d in datasets.items() if lid != test_id], ignore_index=True)
-        evaluate(train_df, datasets[test_id], surface_only_cols, DEPTH_RATIO_COL, f"[ISOLATION-surface] test={test_id}")
+        evaluer(train_df, datasets[test_id], surface_only_cols, DEPTH_RATIO_COL, f"[ISOLATION-surface] test={test_id}")
 
-    # jour 21 : modele deux etages, tente de reconstituer l'echelle separement
-    print("\n\n=== Jour 21 : modele deux etages (echelle + forme) pour reconstituer la profondeur absolue ===")
-    scale_table = build_lake_scale_table(datasets)
+    # 01/08 : modele deux etages, tente de reconstituer l'echelle separement
+    print("\n\n01/08 : modele deux etages (echelle + forme) pour reconstituer la profondeur absolue")
+    scale_table = construire_table_echelle(datasets)
     scale_feature_cols = [c for c in scale_table.columns if c != "max_depth"]
 
     scale_preds = {}
@@ -204,7 +201,7 @@ def main() -> None:
             f"oracle (vraie echelle): R2={r2_oracle:7.3f}{flag}"
         )
 
-    print("\n\n=== Variante etage 1 : regression log-lineaire (extrapole, contrairement au RF) ===")
+    print("\n\nVariante etage 1 : regression log-lineaire (extrapole, contrairement au RF)")
     loglinear_cols = ["surface_area", "mean_shore_dist"]  # les 2 plus correlees a max_depth (0.61 et 0.77)
     scale_table_log = scale_table.copy()
     scale_table_log[loglinear_cols] = np.log(scale_table_log[loglinear_cols])
@@ -240,10 +237,7 @@ def main() -> None:
     # resultat : pire que le RF (L9 +1711% vs +636%) -- manque de lacs, pas le modele
 
 
-def build_lake_scale_table(datasets: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Une ligne par lac : features macro (taille, forme, relief moyen alentour) +
-    profondeur max reelle. Sert a l'etage 1 du modele du jour 21 (predire l'echelle du
-    lac independamment de la forme relief->profondeur traitee par depth_ratio)."""
+def construire_table_echelle(datasets: dict[str, pd.DataFrame]) -> pd.DataFrame:
     elevdiff900_cols = [c for c in next(iter(datasets.values())).columns if "elevdiff900" in c]
     elevdiff300_cols = [c for c in next(iter(datasets.values())).columns if "elevdiff300" in c]
     dist_cols = [c for c in next(iter(datasets.values())).columns if c.endswith("shoreline_distance")]

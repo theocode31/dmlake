@@ -1,5 +1,5 @@
-
 import io
+import sys
 import re
 import zipfile
 from pathlib import Path
@@ -13,7 +13,8 @@ from pyproj import Transformer
 from rasterio.merge import merge
 from rasterio.transform import array_bounds, rowcol
 
-LAKE_ID = "lagomaggiore"
+# lac a traiter : en argument (python src/extract_features.py lacdejoux), sinon celui-ci
+LAKE_ID = sys.argv[1] if len(sys.argv) > 1 else "lagomaggiore"
 BATHY_URL = (
     f"https://data.geo.admin.ch/ch.swisstopo.swissbathy3d/swissbathy3d_{LAKE_ID}/"
     f"swissbathy3d_{LAKE_ID}_2056_5728.xyz.zip"
@@ -25,11 +26,12 @@ DEM_DIR = OUTPUT_DIR / f"dem_{LAKE_ID}"
 DEM_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def download_bathymetry_with_cells() -> tuple[pd.DataFrame, set[tuple[int, int]]]:
+def telecharger_bathymetrie_et_cellules(fraction: float = 1.0) -> tuple[pd.DataFrame, set[tuple[int, int]]]:
     print(f"Telechargement de {BATHY_URL} ...")
     response = requests.get(BATHY_URL, timeout=60)
     response.raise_for_status()
 
+    rng = np.random.default_rng(42)
     frames = []
     cells = set()
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
@@ -41,12 +43,14 @@ def download_bathymetry_with_cells() -> tuple[pd.DataFrame, set[tuple[int, int]]
                 cells.add((int(m.group(1)), int(m.group(2))))
             with archive.open(name) as f:
                 tile_df = pd.read_csv(f, sep=r"\s+", skiprows=1, names=["x", "y", "z"])
+                if fraction < 1.0:
+                    tile_df = tile_df.sample(frac=fraction, random_state=rng)
                 frames.append(tile_df)
 
     return pd.concat(frames, ignore_index=True), cells
 
 
-def buffer_cells(cells: set[tuple[int, int]], ring: int = 1) -> set[tuple[int, int]]:
+def elargir_cellules(cells: set[tuple[int, int]], ring: int = 1) -> set[tuple[int, int]]:
     buffered = set()
     for e, n in cells:
         for de in range(-ring, ring + 1):
@@ -55,7 +59,7 @@ def buffer_cells(cells: set[tuple[int, int]], ring: int = 1) -> set[tuple[int, i
     return buffered
 
 
-def find_dem_tiles(cells: set[tuple[int, int]]) -> dict[tuple[int, int], str]:
+def trouver_tuiles_mnt(cells: set[tuple[int, int]]) -> dict[tuple[int, int], str]:
     es = [c[0] for c in cells]
     ns = [c[1] for c in cells]
     min_e, max_e = min(es), max(es)
@@ -92,7 +96,7 @@ def find_dem_tiles(cells: set[tuple[int, int]]) -> dict[tuple[int, int], str]:
     return found
 
 
-def download_dem_tiles(tiles: dict[tuple[int, int], str]) -> list[Path]:
+def telecharger_tuiles_mnt(tiles: dict[tuple[int, int], str]) -> list[Path]:
     paths = []
     for (_e, _n), href in sorted(tiles.items()):
         fname = DEM_DIR / Path(href).name
@@ -104,7 +108,7 @@ def download_dem_tiles(tiles: dict[tuple[int, int], str]) -> list[Path]:
     return paths
 
 
-def build_mosaic(tile_paths: list[Path]):
+def construire_mosaique(tile_paths: list[Path]):
     srcs = [rasterio.open(p) for p in tile_paths]
     nodata = srcs[0].nodata
     mosaic, transform = merge(srcs)
@@ -116,14 +120,14 @@ def build_mosaic(tile_paths: list[Path]):
     return mosaic, transform
 
 
-def sample_dem_at_points(mosaic: np.ndarray, transform, xs, ys) -> np.ndarray:
+def lire_mnt_aux_points(mosaic: np.ndarray, transform, xs, ys) -> np.ndarray:
     rows, cols = rowcol(transform, xs, ys)
     rows = np.clip(np.asarray(rows), 0, mosaic.shape[0] - 1)
     cols = np.clip(np.asarray(cols), 0, mosaic.shape[1] - 1)
     return mosaic[rows, cols]
 
 
-def plot_overlay(mosaic: np.ndarray, transform, bathy_df: pd.DataFrame) -> None:
+def tracer_superposition(mosaic: np.ndarray, transform, bathy_df: pd.DataFrame) -> None:
     fig, ax = plt.subplots(figsize=(8, 6))
     left, bottom, right, top = array_bounds(mosaic.shape[0], mosaic.shape[1], transform)
     im = ax.imshow(mosaic, cmap="terrain", extent=(left, right, bottom, top), origin="upper")
@@ -140,24 +144,24 @@ def plot_overlay(mosaic: np.ndarray, transform, bathy_df: pd.DataFrame) -> None:
 
 
 def main() -> None:
-    bathy_df, cells = download_bathymetry_with_cells()
+    bathy_df, cells = telecharger_bathymetrie_et_cellules()
     print(f"{len(bathy_df)} points bathymetriques, {len(cells)} cellules km bathy")
 
-    target_cells = buffer_cells(cells, ring=1)
+    target_cells = elargir_cellules(cells, ring=1)
     print(f"{len(target_cells)} cellules cibles pour le MNT (avec couronne de 1km)")
 
-    tiles = find_dem_tiles(target_cells)
-    tile_paths = download_dem_tiles(tiles)
+    tiles = trouver_tuiles_mnt(target_cells)
+    tile_paths = telecharger_tuiles_mnt(tiles)
     print(f"{len(tile_paths)} tuiles MNT telechargees dans {DEM_DIR}")
 
-    mosaic, transform = build_mosaic(tile_paths)
+    mosaic, transform = construire_mosaique(tile_paths)
     print(
         f"Mosaique MNT : {mosaic.shape}, "
         f"altitude min/max = {np.nanmin(mosaic):.1f}/{np.nanmax(mosaic):.1f} m"
     )
 
     sample = bathy_df.sample(n=min(500, len(bathy_df)), random_state=42)
-    dem_at_bathy = sample_dem_at_points(mosaic, transform, sample.x.values, sample.y.values)
+    dem_at_bathy = lire_mnt_aux_points(mosaic, transform, sample.x.values, sample.y.values)
     print(
         f"Altitude MNT au niveau de {len(sample)} points bathy (echantillon) : "
         f"min={dem_at_bathy.min():.1f}, max={dem_at_bathy.max():.1f}, "
@@ -168,7 +172,7 @@ def main() -> None:
         f"min={sample.z.min():.1f}, max={sample.z.max():.1f} m"
     )
 
-    plot_overlay(mosaic, transform, bathy_df)
+    tracer_superposition(mosaic, transform, bathy_df)
 
 
 if __name__ == "__main__":

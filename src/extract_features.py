@@ -1,42 +1,19 @@
-"""
-Jour 3 : extraction des features de relief autour de chaque point bathymetrique.
-
-Objectif : reproduire la methode "profils cross-shore" du stage de reference
-(Kacimi, DEM4Lakes) -- pour chaque point du fond du lac, dans 8 directions
-(0 a 315 degres, pas de 45, 0 = nord, sens horaire) : chercher d'abord le
-rivage (transition eau -> terre dans le masque d'eau), puis prolonger le rayon
-sur terre pour mesurer la pente et le denivele a 4 distances (150/300/600/900 m).
-Ces features decrivent la morphologie du terrain environnant, utilisee ensuite
-pour predire la profondeur sans mesure directe.
-
-Masque d'eau : rasterisation de l'enveloppe convexe des points bathymetriques
-sur la grille du MNT (jour 2). Suffisant pour un lac simple comme Lac de Joux
-(pas besoin du filtrage Sobel utilise par Kacimi pour des lacs plus complexes
-ou seulement echantillonnes).
-
-Limite connue : le MNT (jour 2) n'a ete telecharge qu'avec une couronne de 1km
-autour du lac. Certains rayons, selon leur orientation, peuvent donc sortir de
-la zone couverte avant d'atteindre le vrai rivage -- ces cas sont detailles par
-le flag `angleX_shore_extrapolated` (rivage trouve au bord de la zone couverte,
-pas un vrai contact avec la terre) plutot que d'etre ignores silencieusement.
-"""
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import rasterio.features
 from rasterio.transform import rowcol, array_bounds
-from scipy.spatial import ConvexHull
-from shapely.geometry import Polygon
 
 from fetch_dem import (
     LAKE_ID,
     OUTPUT_DIR,
-    download_bathymetry_with_cells,
-    buffer_cells,
-    find_dem_tiles,
-    download_dem_tiles,
-    build_mosaic,
+    telecharger_bathymetrie_et_cellules,
+    elargir_cellules,
+    trouver_tuiles_mnt,
+    telecharger_tuiles_mnt,
+    construire_mosaique,
+    lire_mnt_aux_points,
 )
+from masque_eau import construire_masque_eau, points_dans_masque
 
 ANGLES = [0, 45, 90, 135, 180, 225, 270, 315]
 DISTANCES = [150, 300, 600, 900]
@@ -44,27 +21,12 @@ STEP = 2.0  # colle a la resolution du MNT
 SHORE_SEARCH_MARGIN = 1.1  # marge de securite sur la diagonale du lac (voir main())
 N_SAMPLE = 2000
 NODATA = -9999.0
+# on ne charge que 5% des points bathy (tires au hasard dans chaque tuile) : on n'en garde
+# que 2000 a la fin, et lacneuchatel complet ne tient pas en memoire
+FRACTION_BATHY = 0.05
 
 
-def build_water_mask(bathy_df: pd.DataFrame, mosaic_shape: tuple[int, int], transform):
-    """Masque d'eau = enveloppe convexe des points bathy, rasterisee sur la
-    grille du MNT."""
-    pts = bathy_df[["x", "y"]].to_numpy()
-    hull = ConvexHull(pts)
-    hull_poly = Polygon(pts[hull.vertices])
-    mask = rasterio.features.rasterize(
-        [(hull_poly, 1)],
-        out_shape=mosaic_shape,
-        transform=transform,
-        fill=0,
-        dtype="uint8",
-    )
-    return mask, hull_poly
-
-
-def sample_along_ray(x0, y0, angle_deg, max_dist, step, arr, transform, fill_value):
-    """Echantillonne `arr` le long d'un rayon parti de (x0, y0). Renvoie aussi
-    `inside`, qui distingue une vraie valeur lue d'une valeur hors-grille."""
+def echantillonner_rayon(x0, y0, angle_deg, max_dist, step, arr, transform, fill_value):
     theta = np.radians(angle_deg)
     dxu, dyu = np.sin(theta), np.cos(theta)
     n = int(max_dist / step)
@@ -80,10 +42,12 @@ def sample_along_ray(x0, y0, angle_deg, max_dist, step, arr, transform, fill_val
     return dists, vals, inside
 
 
-def extract_point_features(x0, y0, z_bed, mask, dem, transform, max_shore_search):
+def extraire_features_point(x0, y0, z_bed, mask, dem, transform, max_shore_search, water_level):
     rec = {"x": x0, "y": y0, "z": z_bed}
+    # profondeur sous le niveau du lac (negative), meme definition que cote francais
+    rec["angle0_z_DEM_ref"] = z_bed - water_level
     for angle in ANGLES:
-        dists, vals, inside = sample_along_ray(
+        dists, vals, inside = echantillonner_rayon(
             x0, y0, angle, max_shore_search, STEP, mask, transform, fill_value=0
         )
         land_idx = np.argmax(vals == 0)
@@ -105,17 +69,7 @@ def extract_point_features(x0, y0, z_bed, mask, dem, transform, max_shore_search
         # (pas une vraie valeur "terre" lue), le signaler plutot que le taire
         rec[f"angle{angle}_shore_extrapolated"] = not bool(inside[land_idx])
 
-        if angle == 0:
-            srow, scol = rowcol(transform, shore_x, shore_y)
-            if 0 <= srow < dem.shape[0] and 0 <= scol < dem.shape[1]:
-                shore_elev = dem[srow, scol]
-            else:
-                shore_elev = np.nan
-            rec["angle0_z_DEM_ref"] = (
-                z_bed - shore_elev if not np.isnan(shore_elev) else np.nan
-            )
-
-        pdists, pvals, pinside = sample_along_ray(
+        pdists, pvals, pinside = echantillonner_rayon(
             shore_x, shore_y, angle, max(DISTANCES), STEP, dem, transform, fill_value=NODATA
         )
         for d in DISTANCES:
@@ -131,9 +85,7 @@ def extract_point_features(x0, y0, z_bed, mask, dem, transform, max_shore_search
     return rec
 
 
-def plot_sanity_check(mosaic, transform, mask, sample_df, hull_poly):
-    """Superpose MNT, masque d'eau et quelques rayons pour verifier visuellement
-    que la methode fait ce qu'on croit."""
+def tracer_verification(mosaic, transform, mask, sample_df, hull_poly):
     fig, ax = plt.subplots(figsize=(8, 6))
     left, bottom, right, top = array_bounds(mosaic.shape[0], mosaic.shape[1], transform)
 
@@ -178,38 +130,56 @@ def plot_sanity_check(mosaic, transform, mask, sample_df, hull_poly):
 
 
 def main() -> None:
-    bathy_df, cells = download_bathymetry_with_cells()
-    print(f"{len(bathy_df)} points bathymetriques, {len(cells)} cellules km bathy")
+    bathy_df, cells = telecharger_bathymetrie_et_cellules(fraction=FRACTION_BATHY)
+    print(f"{len(bathy_df)} points bathymetriques ({FRACTION_BATHY:.0%} tires au hasard), {len(cells)} cellules km bathy")
 
-    target_cells = buffer_cells(cells, ring=1)
-    tiles = find_dem_tiles(target_cells)
-    tile_paths = download_dem_tiles(tiles)
-    mosaic, transform = build_mosaic(tile_paths)
+    target_cells = elargir_cellules(cells, ring=1)
+    tiles = trouver_tuiles_mnt(target_cells)
+    tile_paths = telecharger_tuiles_mnt(tiles)
+    mosaic, transform = construire_mosaique(tile_paths)
     print(f"Mosaique MNT : {mosaic.shape}")
 
-    mask, hull_poly = build_water_mask(bathy_df, mosaic.shape, transform)
+    # quelques points bathy servent juste a reperer quelle zone plate est le lac
+    points_lac = bathy_df.sample(n=min(500, len(bathy_df)), random_state=42)
+    mask, hull_poly = construire_masque_eau(
+        mosaic, transform, nan_est_eau=False, points_x=points_lac.x.values, points_y=points_lac.y.values
+    )
     surface_area_ha = hull_poly.area / 10000.0
+
+    # niveau du lac : le MNT donne la surface de l'eau au-dessus des points bathy du masque
+    dans_lac = points_dans_masque(mask, transform, bathy_df.x.values, bathy_df.y.values)
+    points_eau = bathy_df[dans_lac].sample(n=min(500, int(dans_lac.sum())), random_state=42)
+    mnt_sur_lac = lire_mnt_aux_points(mosaic, transform, points_eau.x.values, points_eau.y.values)
+    water_level = np.nanmedian(mnt_sur_lac)
+    print(f"Niveau du lac = {water_level:.2f} m (ecart-type du MNT sur le lac : {np.nanstd(mnt_sur_lac):.2f} m)")
+
+    # swissBATHY3D contient aussi des points de la berge, au-dessus de l'eau (10% des points
+    # tires pour lacdejoux, jusqu'a +47m) : on ne garde que le fond, dans le masque et sous le niveau du lac
+    fond = dans_lac & (bathy_df.z.values < water_level)
+    print(f"{int(fond.sum())} points du fond gardes sur {len(bathy_df)} "
+          f"({int((~dans_lac).sum())} hors du masque d'eau, {int((dans_lac & ~fond).sum())} au-dessus du niveau du lac)")
+    bathy_fond = bathy_df[fond]
     # coefficient isoperimetrique (compacite de la forme, 4piA/P^2, 1 = cercle parfait) --
     # feature suggeree par Kacimi (rapport de stage) pour remplacer surface_area, qui
-    # dominait l'importance des features sans bien generaliser (jour 7).
+    # dominait l'importance des features sans bien generaliser (14/07).
     isoperimetric_coeff = 4 * np.pi * hull_poly.area / hull_poly.length**2
-    print(f"Masque d'eau construit. Surface (enveloppe convexe) = {surface_area_ha:.1f} ha, coefficient isoperimetrique = {isoperimetric_coeff:.4f}")
+    print(f"Masque d'eau construit. Surface = {surface_area_ha:.1f} ha, coefficient isoperimetrique = {isoperimetric_coeff:.4f}")
 
     # Rayon de recherche du rivage adapte a la taille du lac : la diagonale de son
     # emprise (bathy_df) borne la distance max entre un point du fond et le rivage,
     # quelle que soit la direction -- avec une marge de securite. Un rayon fixe
-    # (2500m, jour 3) etait trop court pour les lacs allonges (jusqu'a 64% de NaN
-    # sur l'axe le plus long, decouvert au jour 6 en comparant plusieurs lacs).
+    # (2500m, 07/07) etait trop court pour les lacs allonges (jusqu'a 64% de NaN
+    # sur l'axe le plus long, decouvert le 14/07 en comparant plusieurs lacs).
     diag = np.hypot(bathy_df.x.max() - bathy_df.x.min(), bathy_df.y.max() - bathy_df.y.min())
     max_shore_search = diag * SHORE_SEARCH_MARGIN
     print(f"Rayon de recherche du rivage : {max_shore_search:.0f} m (diagonale du lac = {diag:.0f} m)")
 
-    sample_df = bathy_df.sample(n=min(N_SAMPLE, len(bathy_df)), random_state=42).reset_index(drop=True)
+    sample_df = bathy_fond.sample(n=min(N_SAMPLE, len(bathy_fond)), random_state=42).reset_index(drop=True)
     print(f"Extraction des features sur {len(sample_df)} points echantillonnes...")
 
     records = []
     for i, row in sample_df.iterrows():
-        rec = extract_point_features(row.x, row.y, row.z, mask, mosaic, transform, max_shore_search)
+        rec = extraire_features_point(row.x, row.y, row.z, mask, mosaic, transform, max_shore_search, water_level)
         rec["surface_area"] = surface_area_ha
         rec["isoperimetric_coeff"] = isoperimetric_coeff
         rec["survey_id"] = LAKE_ID
@@ -227,7 +197,7 @@ def main() -> None:
     print(f"Taux de rivages extrapoles (bord de la zone MNT couverte, pas un vrai contact terre) : {extrap_rate:.1%}")
     print(out_df[["angle0_z_DEM_ref", "angle0_shoreline_distance", "angle0_m300"]].describe())
 
-    plot_sanity_check(mosaic, transform, mask, out_df.assign(x=sample_df.x, y=sample_df.y), hull_poly)
+    tracer_verification(mosaic, transform, mask, out_df.assign(x=sample_df.x, y=sample_df.y), hull_poly)
 
 
 if __name__ == "__main__":

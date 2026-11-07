@@ -1,4 +1,5 @@
 import io
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -8,7 +9,9 @@ import rasterio
 import requests
 from rasterio.transform import array_bounds
 
-LAKE_FOLDER = "L80_ASCONIT_2012"
+# dossier EauFrance a traiter : en argument (python src/extract_features_france.py L80_ASCONIT_2012),
+# sinon celui-ci. La liste complete est dans lacs.py
+LAKE_FOLDER = sys.argv[1] if len(sys.argv) > 1 else "L80_ASCONIT_2012"
 LAKE_ID = LAKE_FOLDER.split("_")[0]
 BATHY_URL = f"https://adour-garonne.eaufrance.fr/upload/DATA/SIG/BATHYMETRIE/xyz_pointcloud/{LAKE_FOLDER}/bathy_profondeurs.xyz"
 WMS_URL = "https://data.geopf.fr/wms-r/wms"
@@ -21,7 +24,7 @@ DEM_DIR = OUTPUT_DIR / "dem_france"
 DEM_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def download_bathymetry() -> pd.DataFrame:
+def telecharger_bathymetrie() -> pd.DataFrame:
     print(f"Telechargement de {BATHY_URL} ...")
     # adour-garonne.eaufrance.fr sert une chaine de certificat incomplete -- donnee
     # publique en clair, risque faible (meme choix que process_eaufrance_lake.py du stage).
@@ -35,7 +38,7 @@ def download_bathymetry() -> pd.DataFrame:
     return df
 
 
-def fetch_dem(bathy_df: pd.DataFrame):
+def recuperer_mnt(bathy_df: pd.DataFrame):
     xmin, xmax = bathy_df.x.min() - BUFFER_M, bathy_df.x.max() + BUFFER_M
     ymin, ymax = bathy_df.y.min() - BUFFER_M, bathy_df.y.max() + BUFFER_M
     width_px = int((xmax - xmin) / DEM_RESOLUTION)
@@ -70,7 +73,7 @@ def fetch_dem(bathy_df: pd.DataFrame):
     return dem, transform
 
 
-def plot_overlay(dem: np.ndarray, transform, bathy_df: pd.DataFrame) -> None:
+def tracer_superposition(dem: np.ndarray, transform, bathy_df: pd.DataFrame) -> None:
     fig, ax = plt.subplots(figsize=(8, 6))
     left, bottom, right, top = array_bounds(dem.shape[0], dem.shape[1], transform)
     im = ax.imshow(dem, cmap="terrain", extent=(left, right, bottom, top), origin="upper")
@@ -87,13 +90,13 @@ def plot_overlay(dem: np.ndarray, transform, bathy_df: pd.DataFrame) -> None:
 
 
 def main() -> None:
-    bathy_df = download_bathymetry()
+    bathy_df = telecharger_bathymetrie()
     print(f"{len(bathy_df)} points bathymetriques, profondeur {bathy_df.z.min():.1f} a {bathy_df.z.max():.1f} m")
 
-    dem, transform = fetch_dem(bathy_df)
+    dem, transform = recuperer_mnt(bathy_df)
     print(f"MNT : {dem.shape}, altitude min/max = {np.nanmin(dem):.1f}/{np.nanmax(dem):.1f} m")
 
-    plot_overlay(dem, transform, bathy_df)
+    tracer_superposition(dem, transform, bathy_df)
 
 
 if __name__ == "__main__":

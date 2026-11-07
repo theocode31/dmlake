@@ -1,13 +1,3 @@
-"""
-Jour 1 : premier contact avec les données.
-
-Objectif : verifier qu'on sait recuperer un jeu de donnees bathymetriques et le
-MNT correspondant pour un lac, et jeter un premier oeil visuel avant de batir
-quoi que ce soit de plus complique (masquage, extraction de profils, ML...).
-
-Lac choisi : Lac de Joux (Suisse), un petit lac peu profond, pratique pour un
-premier test rapide.
-"""
 import io
 import zipfile
 from pathlib import Path
@@ -27,8 +17,7 @@ OUTPUT_DIR = Path(__file__).resolve().parent.parent / "outputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 
-def download_bathymetry() -> pd.DataFrame:
-    """Telecharge le nuage de points bathymetriques et le charge en DataFrame."""
+def telecharger_bathymetrie() -> pd.DataFrame:
     print(f"Telechargement de {BATHY_URL} ...")
     response = requests.get(BATHY_URL, timeout=60)
     response.raise_for_status()
@@ -45,8 +34,7 @@ def download_bathymetry() -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def plot_bathymetry(df: pd.DataFrame) -> None:
-    """Nuage de points colore par profondeur, pour un premier controle visuel."""
+def tracer_bathymetrie(df: pd.DataFrame) -> None:
     fig, ax = plt.subplots(figsize=(8, 6))
     scatter = ax.scatter(df.x, df.y, c=df.z, cmap="viridis_r", s=2)
     ax.set_aspect("equal")
@@ -60,14 +48,14 @@ def plot_bathymetry(df: pd.DataFrame) -> None:
 
 
 def main() -> None:
-    bathy_df = download_bathymetry()
+    bathy_df = telecharger_bathymetrie()
 
     print(f"\n{len(bathy_df)} points bathymetriques charges")
     print(f"Altitude du fond -- min: {bathy_df.z.min():.1f} m, max: {bathy_df.z.max():.1f} m")
     print(f"Emprise x: [{bathy_df.x.min():.0f}, {bathy_df.x.max():.0f}]")
     print(f"Emprise y: [{bathy_df.y.min():.0f}, {bathy_df.y.max():.0f}]")
 
-    plot_bathymetry(bathy_df)
+    tracer_bathymetrie(bathy_df)
 
     sample_path = OUTPUT_DIR / f"{LAKE_ID}_bathymetry_sample.csv"
     bathy_df.sample(n=min(2000, len(bathy_df)), random_state=42).to_csv(sample_path, index=False)
